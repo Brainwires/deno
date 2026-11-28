@@ -151,6 +151,7 @@ deno_core::extension!(
     op_webrtc_transceiver_set_codec_preferences,
     op_webrtc_sender_set_paused,
     op_webrtc_sender_set_streams,
+    op_webrtc_sender_set_track_codec,
     op_webrtc_sender_parameters,
     op_webrtc_receiver_parameters,
     op_webrtc_receiver_sources,
@@ -1043,6 +1044,21 @@ fn op_webrtc_pc_set_negotiation_options(
       &rtp_header_encryption_policy,
       always_negotiate_data_channels,
     )
+  })
+}
+
+/// The sender's new track is an `EncodedMediaTrack` of `codec` (what its
+/// frames are in), or `null`: another track or none.
+#[op2]
+fn op_webrtc_sender_set_track_codec(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  key: u32,
+  #[serde] codec: Option<media::CodecArg>,
+) -> Result<(), WebRtcError> {
+  peer(state, rid)?.media(|core| {
+    core.set_sender_track_codec(key, codec);
+    Ok(())
   })
 }
 

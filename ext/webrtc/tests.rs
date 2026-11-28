@@ -1976,6 +1976,398 @@ async fn answer_to_a_narrow_offer_lists_only_its_formats() {
   b.close();
 }
 
+// DENEXT.md item 572: an answer that lists formats beyond the offer (as
+// rtci's own answers do, RFC 9429 5.3.1) does not widen the codecs a sender
+// reports. The offerer set VP8 alone as its codec preference; the answer it
+// is given adds VP9, and sender getParameters() lists the engine's
+// negotiated codecs (VP8, with the answer's payload type), not VP9 (WPT
+// protocol/h265-level-id "Offer to send H265, answer to receive level-id=30
+// results in level-id=30", which counts them).
+#[tokio::test]
+async fn sender_codecs_are_the_offered_ones_the_answer_accepted() {
+  let a = new_peer();
+  let b = new_peer();
+  let vp8 = crate::media::capabilities("video", true)
+    .unwrap()
+    .expect("capabilities")
+    .codecs
+    .into_iter()
+    .find(|c| c.mime_type.eq_ignore_ascii_case("video/VP8"))
+    .expect("VP8");
+  let key = a
+    .media(|core| {
+      let key = core.add_transceiver(crate::media::TransceiverArg {
+        kind: "video".to_string(),
+        track: Some(crate::media::TrackArg {
+          id: "video-track".to_string(),
+          label: "video".to_string(),
+        }),
+        direction: "sendonly".to_string(),
+        streams: vec!["stream".to_string()],
+        send_encodings: vec![],
+        codec: None,
+        add_track: true,
+      })?;
+      core.set_codec_preferences(key, vec![vp8])?;
+      Ok(key)
+    })
+    .unwrap();
+  let offer = a.create_offer(false).unwrap();
+  assert!(!offer.contains(" VP9/90000"), "{offer}");
+  a.set_local_description("offer", offer.clone()).unwrap();
+  b.set_remote_description("offer", offer).unwrap();
+  let answer = b.create_answer().unwrap();
+  b.set_local_description("answer", answer.clone()).unwrap();
+  assert!(!answer.contains(" VP9/90000"), "{answer}");
+  // The answer as another stack writes it: VP9 on a payload type of its own.
+  let pt = (96u8..=127)
+    .find(|pt| {
+      !answer.contains(&format!("a=rtpmap:{pt} "))
+        && !answer.contains(&format!("a=fmtp:{pt} "))
+    })
+    .expect("a free payload type");
+  let mut widened = String::new();
+  let mut in_video = false;
+  for line in answer.split_inclusive("\r\n") {
+    let bare = line.trim_end();
+    if bare.starts_with("m=") {
+      in_video = bare.starts_with("m=video");
+      if in_video {
+        widened.push_str(&format!("{bare} {pt}\r\n"));
+        continue;
+      }
+    }
+    widened.push_str(line);
+    if in_video && bare.starts_with("a=mid:") {
+      widened.push_str(&format!(
+        "a=rtpmap:{pt} VP9/90000\r\na=fmtp:{pt} profile-id=0\r\n"
+      ));
+    }
+  }
+  assert!(
+    widened.contains(&format!("a=rtpmap:{pt} VP9/90000")),
+    "{widened}"
+  );
+  a.set_remote_description("answer", widened.clone()).unwrap();
+  let answered = section_formats(&widened)[0].clone();
+  let params = a.media(|core| core.sender_parameters(key)).unwrap();
+  let codecs = params["codecs"].as_array().cloned().unwrap_or_default();
+  assert!(
+    codecs.iter().any(|c| c["mimeType"]
+      .as_str()
+      .is_some_and(|m| m.eq_ignore_ascii_case("video/VP8"))),
+    "{params}"
+  );
+  for c in &codecs {
+    let mime = c["mimeType"].as_str().unwrap_or_default();
+    assert!(!mime.eq_ignore_ascii_case("video/VP9"), "{params}");
+    let codec_pt = c["payloadType"].as_u64().unwrap().to_string();
+    assert!(answered.contains(&codec_pt), "{codec_pt}: {params}");
+  }
+  a.close();
+  b.close();
+}
+
+/// A capability of `kind` by its mime type (any case).
+fn capability(kind: &str, mime: &str) -> crate::media::CodecArg {
+  crate::media::capabilities(kind, true)
+    .unwrap()
+    .expect("capabilities")
+    .codecs
+    .into_iter()
+    .find(|c| c.mime_type.eq_ignore_ascii_case(mime))
+    .unwrap_or_else(|| panic!("{mime} is a capability"))
+}
+
+/// WPT `webrtc/protocol/additional-codecs.html` between two peers: `a`
+/// sends video and prefers VP8 (`setCodecPreferences([vp8])`, or an
+/// `EncodedMediaTrack` of `track_codec`); its offer reaches `b` with VP8
+/// renamed `no-such-codec` and H.264 added on payload type 63, so `b`'s
+/// answer leads with H.264 on 63. Returns both peers once connected, with
+/// `a`'s and `b`'s transceiver keys.
+async fn connect_answered_with_h264(
+  track_codec: Option<crate::media::CodecArg>,
+) -> (Rc<Peer>, Rc<Peer>, u32, u32) {
+  let a = new_peer();
+  let b = new_peer();
+  let mut ea = Vec::new();
+  let mut eb = Vec::new();
+  let vp8 = capability("video", "video/VP8");
+  let h264 = capability("video", "video/H264");
+  let a_key = a
+    .media(|core| {
+      let key = core.add_transceiver(crate::media::TransceiverArg {
+        kind: "video".to_string(),
+        track: Some(crate::media::TrackArg {
+          id: "video-track".to_string(),
+          label: "video".to_string(),
+        }),
+        direction: "sendonly".to_string(),
+        streams: vec!["stream".to_string()],
+        send_encodings: vec![],
+        codec: track_codec.clone(),
+        add_track: true,
+      })?;
+      if track_codec.is_none() {
+        core.set_codec_preferences(key, vec![vp8])?;
+      }
+      Ok(key)
+    })
+    .unwrap();
+  let offer = a.create_offer(false).unwrap();
+  a.set_local_description("offer", offer).unwrap();
+  wait_for(&a, &mut ea, gathered).await;
+  let (_, sdp) = a.local_description().unwrap();
+  assert!(!sdp.contains(" H264/90000"), "a offers VP8 alone: {sdp}");
+  let munged = sdp
+    .lines()
+    .map(|l| {
+      let l = l.trim_end();
+      if l.starts_with("m=") {
+        format!("{l} 63")
+      } else {
+        l.to_string()
+      }
+    })
+    .collect::<Vec<_>>()
+    .join("\r\n")
+    + "\r\na=rtpmap:63 H264/90000\r\n"
+    + &format!(
+      "a=fmtp:63 {}\r\n",
+      h264.sdp_fmtp_line.clone().unwrap_or_default()
+    );
+  let munged = munged.replace("VP8", "no-such-codec");
+  b.set_remote_description("offer", munged).unwrap();
+  let answer = b.create_answer().unwrap();
+  b.set_local_description("answer", answer).unwrap();
+  wait_for(&b, &mut eb, gathered).await;
+  let (_, answer) = b.local_description().unwrap();
+  assert_eq!(
+    section_formats(&answer)[0].first().map(String::as_str),
+    Some("63"),
+    "the answer leads with H.264 on 63: {answer}"
+  );
+  a.set_remote_description("answer", answer).unwrap();
+  wait_for(&a, &mut ea, connected).await;
+  wait_for(&b, &mut eb, connected).await;
+  let b_key = b
+    .media(|core| Ok(core.transceivers()))
+    .unwrap()
+    .into_iter()
+    .find(|t| t.kind == "video")
+    .expect("b has the video transceiver")
+    .key;
+  (a, b, a_key, b_key)
+}
+
+/// The RTP packets `b` received on `key` among `events`.
+fn received_rtp(
+  events: &[JsEvent],
+  key: u32,
+) -> Vec<rtci::rtp::packet::Packet> {
+  events
+    .iter()
+    .filter_map(|e| match e {
+      JsEvent::Rtp { transceiver, data } if *transceiver == key => {
+        let bytes = data.bytes();
+        let mut buf = bytes.as_slice();
+        <rtci::rtp::packet::Packet as rtci::shared::marshal::Unmarshal>::unmarshal(
+          &mut buf,
+        )
+        .ok()
+      }
+      _ => None,
+    })
+    .collect()
+}
+
+// An offerer that prefers VP8, given an answer that leads with H.264 on a
+// payload type it never offered (WPT protocol/additional-codecs), encodes
+// H.264 from then on: the fake camera's frames are its H.264 clip, cut by
+// the H.264 packetizer, on payload type 63 (RFC 3264 section 7: the
+// offerer sends a format the answer lists; W3C webrtc-pc 5.2: the codecs
+// negotiated for sending). What arrives is H.264 NAL units, not VP8 frames
+// labelled H.264 (the engine's write_rtp rewrites a payload type that is
+// not negotiated, so it can't catch a mismatch itself).
+#[tokio::test]
+async fn sender_encodes_the_codec_the_answer_leads_with() {
+  let (a, b, a_key, b_key) = connect_answered_with_h264(None).await;
+  let params = a.media(|core| core.sender_parameters(a_key)).unwrap();
+  assert_eq!(params["codecs"][0]["mimeType"], "video/H264", "{params}");
+  assert_eq!(params["codecs"][0]["payloadType"], 63, "{params}");
+  b.media(|core| {
+    core.media.reading.insert(b_key);
+    Ok(())
+  })
+  .unwrap();
+  let mut eb = Vec::new();
+  for _ in 0..100 {
+    a.media(|core| core.write_fake(a_key, false)).unwrap();
+    events_for(&b, &mut eb, Duration::from_millis(30)).await;
+    if received_rtp(&eb, b_key).len() >= 10 {
+      break;
+    }
+  }
+  let packets = received_rtp(&eb, b_key);
+  assert!(packets.len() >= 10, "{} packets arrived", packets.len());
+  for p in &packets {
+    assert_eq!(p.header.payload_type, 63, "{:?}", p.header);
+    // RFC 6184 section 5.3: F bit clear, a NAL unit type that is a single
+    // NAL unit (1-23), a STAP-A (24) or an FU-A (28). A VP8 payload
+    // descriptor (0x10, 0x90, 0x00 first) is none of these.
+    let first = p.payload.first().copied().unwrap_or(0x80);
+    let nal_type = first & 0x1f;
+    assert_eq!(first & 0x80, 0, "{:02x?}", &p.payload[..]);
+    assert!(
+      (1..=23).contains(&nal_type) || nal_type == 24 || nal_type == 28,
+      "NAL type {nal_type}: {:02x?}",
+      &p.payload[..p.payload.len().min(8)]
+    );
+  }
+  // What a frame's metadata names is the same format.
+  let info = a
+    .media(|core| core.reserve_frame(a_key, 1000.0 / 30.0))
+    .unwrap()
+    .expect("negotiated");
+  assert_eq!(info.payload_type, 63);
+  assert!(info.mime_type.eq_ignore_ascii_case("video/H264"));
+  // The receiver's inbound stream names H.264 as its codec.
+  let stats = b.stats(None).unwrap();
+  let inbound = stats
+    .iter()
+    .find(|s| s["type"] == "inbound-rtp" && s["kind"] == "video")
+    .expect("an inbound-rtp stream");
+  let codec_id = inbound["codecId"].as_str().expect("inbound codecId");
+  let codec = stats
+    .iter()
+    .find(|s| s["id"] == codec_id)
+    .expect("the inbound codec object");
+  assert!(
+    codec["mimeType"]
+      .as_str()
+      .is_some_and(|m| m.eq_ignore_ascii_case("video/H264")),
+    "{codec}"
+  );
+  a.close();
+  b.close();
+}
+
+// An EncodedMediaTrack's frames are in its codec. Given an answer that
+// negotiates another (H.264 where the track is VP8), its sender sends
+// nothing: neither writeFrame nor writeRtp puts VP8 bytes on H.264's
+// payload type (the engine drops the encoding's VP8 codec after the
+// answer, webrtc-pc 4.4.1.6, and would send the first negotiated format).
+#[tokio::test]
+async fn encoded_track_sends_nothing_in_a_codec_the_answer_did_not_take() {
+  let vp8 = capability("video", "video/VP8");
+  let (a, b, a_key, b_key) = connect_answered_with_h264(Some(vp8)).await;
+  b.media(|core| {
+    core.media.reading.insert(b_key);
+    Ok(())
+  })
+  .unwrap();
+  // A VP8 key frame (payload descriptor, then the tag and start code).
+  let frame: &[u8] = &[0x10, 0x50, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x80, 0x02];
+  let packet = rtci::rtp::packet::Packet {
+    header: rtci::rtp::Header {
+      version: 2,
+      marker: true,
+      payload_type: 99,
+      sequence_number: 1,
+      timestamp: 3000,
+      ..Default::default()
+    },
+    payload: bytes::Bytes::copy_from_slice(frame),
+  };
+  let packet = rtci::shared::marshal::Marshal::marshal(&packet).unwrap();
+  let mut eb = Vec::new();
+  for _ in 0..10 {
+    let sent = a
+      .media(|core| core.write_frame(a_key, frame, 1000.0 / 30.0))
+      .unwrap();
+    assert!(!sent, "writeFrame sent VP8 on an H.264 sender");
+    let sent = a.media(|core| core.write_rtp(a_key, &packet)).unwrap();
+    assert!(!sent, "writeRtp sent VP8 on an H.264 sender");
+    events_for(&b, &mut eb, Duration::from_millis(30)).await;
+  }
+  assert_eq!(received_rtp(&eb, b_key).len(), 0);
+  a.close();
+  b.close();
+}
+
+#[test]
+fn sending_codec_follows_the_negotiated_list() {
+  use rtci::rtp_transceiver::rtp_sender::RTCRtpCodec;
+  use rtci::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
+  use rtci::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters;
+  use rtci::rtp_transceiver::rtp_sender::RTCRtpSendParameters;
+  let codec = |mime: &str, pt: u8, fmtp: &str| RTCRtpCodecParameters {
+    rtp_codec: RTCRtpCodec {
+      mime_type: mime.to_string(),
+      clock_rate: 90000,
+      channels: 0,
+      sdp_fmtp_line: fmtp.to_string(),
+      rtcp_feedback: vec![],
+    },
+    payload_type: pt,
+  };
+  let mut params = RTCRtpSendParameters::default();
+  params.rtp_parameters.codecs = vec![
+    codec("video/rtx", 99, "apt=63"),
+    codec(
+      "video/H264",
+      63,
+      "packetization-mode=1;profile-level-id=42e01f",
+    ),
+    codec("video/VP8", 97, ""),
+  ];
+  params.encodings = vec![RTCRtpEncodingParameters {
+    active: true,
+    ..Default::default()
+  }];
+  let pt = |p: &RTCRtpSendParameters,
+            track: Option<&crate::media::CodecArg>| {
+    crate::media::sending_codec(p, track).map(|c| c.payload_type)
+  };
+  // The list's first media format, not its repair format.
+  assert_eq!(pt(&params, None), Some(63));
+  // An encoding that names a negotiated codec sends it; one that names a
+  // codec no longer negotiated sends nothing.
+  params.encodings[0].codec = codec("video/VP8", 0, "").rtp_codec;
+  assert_eq!(pt(&params, None), Some(97));
+  params.encodings[0].codec = codec("video/AV1", 0, "").rtp_codec;
+  assert_eq!(pt(&params, None), None);
+  params.encodings[0].codec = RTCRtpCodec::default();
+  // An EncodedMediaTrack's codec, on its own payload type, or not at all.
+  let track = |mime: &str, fmtp: Option<&str>| crate::media::CodecArg {
+    mime_type: mime.to_string(),
+    clock_rate: 90000,
+    channels: None,
+    sdp_fmtp_line: fmtp.map(str::to_string),
+  };
+  assert_eq!(pt(&params, Some(&track("video/VP8", None))), Some(97));
+  assert_eq!(pt(&params, Some(&track("video/VP9", None))), None);
+  // H.264 of another level is the same bitstream; of another packetization
+  // mode it is not.
+  assert_eq!(
+    pt(
+      &params,
+      Some(&track(
+        "video/H264",
+        Some("packetization-mode=1;profile-level-id=42e034")
+      ))
+    ),
+    Some(63)
+  );
+  assert_eq!(
+    pt(
+      &params,
+      Some(&track("video/H264", Some("profile-level-id=42e01f")))
+    ),
+    None
+  );
+}
+
 // setCodecPreferences() takes what getCapabilities() lists, for audio too:
 // a mono codec there has `channels: 1`, which the engine (whose rtpmap has
 // no encoding parameter for it) holds as 0 (WPT

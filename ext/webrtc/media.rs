@@ -61,6 +61,7 @@ use rtci::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters;
 use rtci::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability;
 use rtci::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionEncryption;
 use rtci::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionToNegotiate;
+use rtci::rtp_transceiver::rtp_sender::RTCRtpSendParameters;
 use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 use rtci::rtp_transceiver::rtp_sender::TYPE_RTCP_FB_ACK;
 use rtci::sansio::Protocol;
@@ -1228,6 +1229,108 @@ pub fn frame_size(mime_type: &str, data: &[u8]) -> Option<(u16, u16)> {
   Some((w, h))
 }
 
+/// A format no encoder produces frames in: one that repairs or protects
+/// another's packets (RTX, RED, ULPFEC, FlexFEC; the engine's
+/// `is_repair_codec`), comfort noise or telephone events.
+fn is_auxiliary_mime(mime: &str) -> bool {
+  let mime = mime.to_ascii_lowercase();
+  let subtype = mime.split_once('/').map_or(mime.as_str(), |(_, s)| s);
+  matches!(subtype, "rtx" | "ulpfec" | "red" | "cn" | "telephone-event")
+    || subtype.starts_with("flexfec")
+}
+
+/// One parameter of an `a=fmtp` line (`name=value;...`), lowercased.
+fn fmtp_param(fmtp: &str, name: &str) -> Option<String> {
+  fmtp.split(';').find_map(|p| {
+    let (k, v) = p.split_once('=')?;
+    k.trim()
+      .eq_ignore_ascii_case(name)
+      .then(|| v.trim().to_ascii_lowercase())
+  })
+}
+
+/// The negotiated format that is `wanted`: same name, clock rate and
+/// channels, the one with the same `a=fmtp` first, else any whose
+/// parameters describe the same bitstream (H.264's packetization mode,
+/// VP9's profile; the rest, such as a level, the receiver's limit).
+fn negotiated_format<'a>(
+  codecs: &'a [RTCRtpCodecParameters],
+  wanted: &RTCRtpCodec,
+) -> Option<&'a RTCRtpCodecParameters> {
+  let same = |c: &&RTCRtpCodecParameters| {
+    c.rtp_codec
+      .mime_type
+      .eq_ignore_ascii_case(&wanted.mime_type)
+      && c.rtp_codec.clock_rate == wanted.clock_rate
+      && c.rtp_codec.channels == wanted.channels
+  };
+  let mime = wanted.mime_type.to_ascii_lowercase();
+  let bitstream: &[(&str, &str)] = match mime.as_str() {
+    "video/h264" | "video/h265" => &[("packetization-mode", "0")],
+    "video/vp9" => &[("profile-id", "0")],
+    "video/av1" => &[("profile", "0")],
+    _ => &[],
+  };
+  codecs
+    .iter()
+    .filter(same)
+    .find(|c| c.rtp_codec.sdp_fmtp_line.trim() == wanted.sdp_fmtp_line.trim())
+    .or_else(|| {
+      codecs.iter().filter(same).find(|c| {
+        bitstream.iter().all(|(name, default)| {
+          fmtp_param(&c.rtp_codec.sdp_fmtp_line, name)
+            .unwrap_or_else(|| default.to_string())
+            == fmtp_param(&wanted.sdp_fmtp_line, name)
+              .unwrap_or_else(|| default.to_string())
+        })
+      })
+    })
+}
+
+/// The negotiated format a sender's frames go out in, with the payload type
+/// the remote description gave it, from the engine sender's parameters as
+/// the last applied description left them (W3C webrtc-pc 5.2: the codecs
+/// negotiated for sending, in the remote m= line's order of preference):
+/// - a sender fed by an `EncodedMediaTrack` sends its codec, the one its
+///   bytes are already in: the negotiated format that is it, or none, and
+///   then nothing is sent (another format's payload type on its bytes
+///   would have the receiver decode them as that format);
+/// - else the codec the first encoding names (`RTCRtpEncodingParameters`
+///   `codec`, which the engine removes when an answer does not negotiate
+///   it, webrtc-pc 4.4.1.6);
+/// - else the first media format of the list (not a repair format, comfort
+///   noise or telephone events): an answer that leads with H.264 has H.264
+///   sent, whatever the local preferences or offer led with.
+///
+/// The engine's `write_rtp` rewrites a packet whose payload type is not
+/// negotiated to its encoding's format, so a packet cut for the wrong format
+/// would leave labelled as another: what is cut is chosen here, and always
+/// carries a negotiated payload type.
+pub(crate) fn sending_codec(
+  params: &RTCRtpSendParameters,
+  track_codec: Option<&CodecArg>,
+) -> Option<RTCRtpCodecParameters> {
+  let codecs: Vec<RTCRtpCodecParameters> = params
+    .rtp_parameters
+    .codecs
+    .iter()
+    .filter(|c| !is_auxiliary_mime(&c.rtp_codec.mime_type))
+    .cloned()
+    .collect();
+  if let Some(track) = track_codec {
+    return negotiated_format(&codecs, &track.to_codec()).cloned();
+  }
+  let named = params
+    .encodings
+    .first()
+    .map(|e| &e.codec)
+    .filter(|c| !c.mime_type.is_empty());
+  match named {
+    Some(codec) => negotiated_format(&codecs, codec).cloned(),
+    None => codecs.into_iter().next(),
+  }
+}
+
 fn payloader_for(
   mime: &str,
 ) -> Option<Box<dyn rtci::rtp::packetizer::Payloader>> {
@@ -1263,6 +1366,9 @@ pub struct MediaState {
   /// inactive: what is written to them is dropped.
   pub paused: std::collections::HashSet<u32>,
   pub packetizers: HashMap<u32, SenderPacketizer>,
+  /// The codec of the `EncodedMediaTrack` each sender is fed by, which the
+  /// bytes of its `writeFrame` / `writeRtp` are in ([`sending_codec`]).
+  pub track_codecs: HashMap<u32, CodecArg>,
   /// Keys whose receiver delivered its first packet (`unmute` was sent).
   pub flowing: std::collections::HashSet<u32>,
   /// The generation JavaScript gave each receiver's last mute
@@ -1603,6 +1709,7 @@ impl Core {
     media.reading.remove(&key);
     media.paused.remove(&key);
     media.packetizers.remove(&key);
+    media.track_codecs.remove(&key);
     media.flowing.remove(&key);
     media.dtmf.remove(&key);
     media.sources.remove(&key);
@@ -1706,6 +1813,7 @@ impl Core {
       self.media.paused.insert(key);
     }
     if let Some(codec) = &arg.codec {
+      self.media.track_codecs.insert(key, codec.clone());
       let _ =
         self.set_codec_preferences_inner(index, &track_preferences(codec));
     }
@@ -1823,6 +1931,24 @@ impl Core {
     } else {
       self.ensure_sender(key);
       self.media.paused.remove(&key);
+    }
+  }
+
+  /// The sender's track changed: `codec` is the new track's when it is an
+  /// `EncodedMediaTrack` (what its frames are in), `None` for any other
+  /// track or none.
+  pub(crate) fn set_sender_track_codec(
+    &mut self,
+    key: u32,
+    codec: Option<CodecArg>,
+  ) {
+    match codec {
+      Some(codec) => {
+        self.media.track_codecs.insert(key, codec);
+      }
+      None => {
+        self.media.track_codecs.remove(&key);
+      }
     }
   }
 
@@ -2059,12 +2185,16 @@ impl Core {
     key: u32,
   ) -> Result<serde_json::Value, WebRtcError> {
     let index = self.index_of(key)?;
-    // webrtc-pc 5.2 getParameters(): the codecs negotiated for sending, in
-    // the remote description's order with its payload types and fmtp lines
-    // (RFC 9429 5.3.1: the answerer sends what the offer lists), those this
-    // stack can send; a retransmission format with the primary it repairs.
-    let remote_codecs = self
-      .negotiated_section_codecs(index, false)
+    // webrtc-pc 5.2 getParameters(): the codecs negotiated for sending. The
+    // set is the engine's own (its sender's codecs: what this side offered
+    // that the answer accepted, or the formats of a remote offer this side
+    // can send), which a remote answer listing formats beyond the offer
+    // does not widen (DENEXT.md item 572); each is written as the remote
+    // description has it (its payload type and fmtp line, RFC 9429 5.3.1),
+    // in the remote m= line's order of preference.
+    let remote_section = self.negotiated_section_codecs(index, false);
+    let remote_codecs = remote_section
+      .clone()
       .map(|(kind, codecs)| sendable_codecs(&kind, codecs));
     let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
       // A transceiver a remote offer made has no engine sender until it
@@ -2082,11 +2212,21 @@ impl Core {
       });
     };
     let params = sender.get_parameters().clone();
-    let codecs: Vec<serde_json::Value> = match remote_codecs {
-      Some(codecs) => codecs
+    let codecs = match remote_codecs {
+      // The engine holds no send codecs for a transceiver negotiated not
+      // to send; getParameters() lists what the remote side would take all
+      // the same (WPT RTCRtpParameters-codecs "should have codecs after
+      // negotiation", a recvonly answerer).
+      Some(codecs) if params.rtp_parameters.codecs.is_empty() => codecs
         .iter()
         .map(|(pt, c)| section_codec_json(*pt, c))
         .collect(),
+      Some(_) => negotiated_send_codecs(
+        &params.rtp_parameters.codecs,
+        remote_section
+          .as_ref()
+          .map_or(&[][..], |(_, c)| c.as_slice()),
+      ),
       None => params
         .rtp_parameters
         .codecs
@@ -2199,6 +2339,22 @@ impl Core {
       return Ok(false);
     };
     packet.header.ssrc = ssrc;
+    // The packet's payload is in the track's codec: one with a payload type
+    // that isn't negotiated goes out on that codec's, and none goes out
+    // while it isn't negotiated (the engine would rewrite the payload type
+    // to another format's, [`sending_codec`]).
+    let params = sender.get_parameters();
+    let negotiated = params
+      .rtp_parameters
+      .codecs
+      .iter()
+      .any(|c| c.payload_type == packet.header.payload_type);
+    if !negotiated {
+      match sending_codec(params, self.media.track_codecs.get(&key)) {
+        Some(codec) => packet.header.payload_type = codec.payload_type,
+        None => return Ok(false),
+      }
+    }
     match sender.write_rtp(Instant::now(), packet) {
       Ok(()) => Ok(true),
       // Not negotiated (yet): dropped, as a sender that isn't sending
@@ -2218,9 +2374,13 @@ impl Core {
     self.write_frame_at(key, data, duration_ms, None)
   }
 
-  /// The packetizer of a sender's negotiated codec (the first that isn't a
-  /// repair format), made anew when the codec or SSRC changed; `None` before
-  /// negotiation or while the sender is paused.
+  /// The packetizer of the format the sender sends ([`sending_codec`]),
+  /// read from the engine sender for every frame, so each applied
+  /// description that changes it (an answer that leads with another codec, a
+  /// renegotiation) switches it, and made anew when the format, its payload
+  /// type or the SSRC changed; `None` before negotiation, while the sender
+  /// is paused, or for an `EncodedMediaTrack` whose codec was not
+  /// negotiated.
   fn sender_packetizer(
     &mut self,
     key: u32,
@@ -2236,11 +2396,11 @@ impl Core {
     let Some(ssrc) = sender.ssrcs().next() else {
       return Ok(None);
     };
-    let params = sender.get_parameters().clone();
-    let Some(codec) = params.rtp_parameters.codecs.iter().find(|c| {
-      let m = c.rtp_codec.mime_type.to_ascii_lowercase();
-      !m.ends_with("/rtx") && !m.contains("fec") && !m.ends_with("/red")
-    }) else {
+    let Some(codec) =
+      sending_codec(sender.get_parameters(), self.media.track_codecs.get(&key))
+    else {
+      // Nothing that was cut for an earlier format is kept.
+      self.media.packetizers.remove(&key);
       return Ok(None);
     };
     let needs_new = match self.media.packetizers.get(&key) {
@@ -2436,16 +2596,10 @@ impl Core {
     let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
       return Ok(false);
     };
-    let Some(mime) = sender
-      .get_parameters()
-      .rtp_parameters
-      .codecs
-      .iter()
-      .map(|c| c.rtp_codec.mime_type.clone())
-      .find(|m| {
-        let m = m.to_ascii_lowercase();
-        !m.ends_with("/rtx") && !m.contains("fec") && !m.ends_with("/red")
-      })
+    // The device encodes in the format the sender sends.
+    let Some(mime) =
+      sending_codec(sender.get_parameters(), self.media.track_codecs.get(&key))
+        .map(|c| c.rtp_codec.mime_type)
     else {
       return Ok(false);
     };
@@ -2819,6 +2973,37 @@ fn sendable_codecs(
       }
     })
     .collect()
+}
+
+/// The engine sender's codecs (`engine`, in the remote description's
+/// payload types) as `getParameters()` lists them: each written as the
+/// remote m-section (`section`) has it, in that section's order, and any the
+/// section does not name after them as the engine holds them.
+fn negotiated_send_codecs(
+  engine: &[RTCRtpCodecParameters],
+  section: &[(u8, CodecArg)],
+) -> Vec<serde_json::Value> {
+  let in_engine = |pt: u8, c: &CodecArg| {
+    engine.iter().any(|e| {
+      e.payload_type == pt
+        && e.rtp_codec.mime_type.eq_ignore_ascii_case(&c.mime_type)
+    })
+  };
+  let mut out: Vec<serde_json::Value> = section
+    .iter()
+    .filter(|(pt, c)| in_engine(*pt, c))
+    .map(|(pt, c)| section_codec_json(*pt, c))
+    .collect();
+  for e in engine {
+    let listed = section.iter().any(|(pt, c)| {
+      *pt == e.payload_type
+        && e.rtp_codec.mime_type.eq_ignore_ascii_case(&c.mime_type)
+    });
+    if !listed {
+      out.push(codec_params_json(e));
+    }
+  }
+  out
 }
 
 fn codec_params_json(c: &RTCRtpCodecParameters) -> serde_json::Value {

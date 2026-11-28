@@ -60,6 +60,7 @@ const {
   op_webrtc_sender_send_dtmf,
   op_webrtc_sender_set_paused,
   op_webrtc_sender_set_streams,
+  op_webrtc_sender_set_track_codec,
   op_webrtc_sender_write_frame,
   op_webrtc_sender_write_rtp,
   op_webrtc_set_log_level,
@@ -3370,6 +3371,13 @@ function setSenderTrack(sender, track) {
   updateSenderSource(sender, previous, track);
   const pc = sender[_pc];
   if (!pc[_state].closed) {
+    // An EncodedMediaTrack's frames are in its codec: the sender sends them
+    // only on that codec's negotiated payload type (media.rs sending_codec).
+    op_webrtc_sender_set_track_codec(
+      pc[_rid],
+      sender[_transceiver][_key],
+      track?.[_source]?.codec ?? null,
+    );
     op_webrtc_sender_set_paused(
       pc[_rid],
       sender[_transceiver][_key],
