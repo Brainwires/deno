@@ -40,7 +40,7 @@ const { createFilteredInspectProxy } = core.loadExtScript(
 const { forgivingBase64Encode } = core.loadExtScript(
   "ext:deno_web/00_infra.js",
 );
-const { EventTarget, ProgressEvent } = core.loadExtScript(
+const { dispatchTrusted, EventTarget, ProgressEvent } = core.loadExtScript(
   "ext:deno_web/02_event.js",
 );
 const { decode, TextDecoder } = core.loadExtScript(
@@ -128,7 +128,7 @@ class FileReader extends EventTarget {
               if (abortedState.aborted) return;
               // fire a progress event for loadstart
               const ev = new ProgressEvent("loadstart", {});
-              this.dispatchEvent(ev);
+              dispatchTrusted(this, ev);
             });
           }
           // 3. Set isFirstChunk to false.
@@ -155,7 +155,7 @@ class FileReader extends EventTarget {
               });
               setTimeout(() => {
                 if (abortedState.aborted) return;
-                this.dispatchEvent(ev);
+                dispatchTrusted(this, ev);
               });
             }
 
@@ -233,7 +233,7 @@ class FileReader extends EventTarget {
                   loaded: size,
                   total: size,
                 });
-                this.dispatchEvent(ev);
+                dispatchTrusted(this, ev);
               }
 
               // 5. If fr's state is not "loading", fire a progress event called loadend at the fr.
@@ -249,7 +249,7 @@ class FileReader extends EventTarget {
                     loaded: size,
                     total: size,
                   });
-                  this.dispatchEvent(ev);
+                  dispatchTrusted(this, ev);
                 }
               });
             });
@@ -265,7 +265,7 @@ class FileReader extends EventTarget {
 
             {
               const ev = new ProgressEvent("error", {});
-              this.dispatchEvent(ev);
+              dispatchTrusted(this, ev);
             }
 
             // If fr's state is not "loading", fire a progress event called
@@ -277,7 +277,7 @@ class FileReader extends EventTarget {
               if (abortedState.aborted) return;
               if (this[state] !== "loading") {
                 const ev = new ProgressEvent("loadend", {});
-                this.dispatchEvent(ev);
+                dispatchTrusted(this, ev);
               }
             });
           });
@@ -366,12 +366,12 @@ class FileReader extends EventTarget {
 
     // Fire a progress event called abort at the context object.
     const ev = new ProgressEvent("abort", {});
-    this.dispatchEvent(ev);
+    dispatchTrusted(this, ev);
 
     // If context object's state is not "loading", fire a progress event called loadend at the context object.
     if (this[state] !== "loading") {
       const ev = new ProgressEvent("loadend", {});
-      this.dispatchEvent(ev);
+      dispatchTrusted(this, ev);
     }
   }
 

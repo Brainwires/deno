@@ -1084,6 +1084,12 @@ function fireEvent(target, EventInterface, type, init) {
   return dispatchNodeEvent(target, ev);
 }
 
+// The web extensions dispatch their own events with `02_event.js`'s
+// `dispatchTrusted()`, which reads no property of the target (a page can
+// replace `dispatchEvent`). At a node it has to be the dispatch above, so it
+// is registered there, once.
+event.setNodeDispatcher((value) => isNode(value), dispatchNodeEvent);
+
 // --- Node ---------------------------------------------------------------------
 
 class Node extends EventTarget {

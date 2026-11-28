@@ -98,12 +98,38 @@ let eventInternals;
 //   subclass can shadow it. (Deno keeps it on the prototype: defining it per
 //   event costs too much for a runtime whose scripts are trusted.)
 // - `dispatchEvent()` checks its argument and the dispatch flag first, and
-//   an event that was dispatched before is no longer trusted: a script
-//   cannot send a trusted event it received on a second trip.
+//   clears `isTrusted`, as the DOM Standard says: what a script dispatches
+//   is never trusted, whatever the event was before.
+// - The extensions' own events do not go through a target's `dispatchEvent`
+//   property, which a script can replace (on the object or on a prototype)
+//   to be handed a trusted event before its dispatch: `dispatchTrusted()`
+//   below runs the dispatch itself, and marks the event trusted.
 let unforgeableEvents = false;
 
 function enableUnforgeableEvents() {
   unforgeableEvents = true;
+}
+
+function unforgeableEventsEnabled() {
+  return unforgeableEvents;
+}
+
+// denext: the targets an embedder dispatches at with an algorithm of its own
+// (ext/web_page: nodes, along the tree). Set once, by the embedder's
+// extension script; `dispatchTrusted()` asks it first.
+let nodeDispatcher = null;
+
+/**
+ * @param {(target: unknown) => boolean} isNode
+ * @param {(target: EventTarget, event: Event) => boolean} dispatchNode
+ *   dispatches an event that is not being dispatched, as it is (the trust is
+ *   the caller's), and answers whether it was not canceled
+ */
+function setNodeDispatcher(isNode, dispatchNode) {
+  if (nodeDispatcher !== null) {
+    throw new TypeError("The node dispatcher is already set");
+  }
+  nodeDispatcher = { __proto__: null, isNode, dispatchNode };
 }
 
 const isTrustedDescriptor = {
@@ -123,9 +149,6 @@ class Event {
   #stopImmediatePropagationFlag = false;
   #inPassiveListener = false;
   #dispatched = false;
-  // denext: whether a dispatch of the event has started before. Read by
-  // `prepareScriptDispatch()` only.
-  #dispatchedBefore = false;
   #isTrusted = false;
   #path = [];
 
@@ -144,9 +167,6 @@ class Event {
     };
     setDispatched = (event, value) => {
       event.#dispatched = value;
-      if (value) {
-        event.#dispatchedBefore = true;
-      }
     };
     setEventPhase = (event, value) => {
       event.#attributes.eventPhase = value;
@@ -169,18 +189,13 @@ class Event {
 
     // The steps of `dispatchEvent()` before "dispatch", with
     // `unforgeableEvents`: https://dom.spec.whatwg.org/#dom-eventtarget-dispatchevent
-    // The standard clears `isTrusted` there, always. The extensions dispatch
-    // their trusted events through `dispatchEvent()` too, so the first
-    // dispatch of an event keeps the flag and every later one clears it.
+    // The extensions' trusted events do not come this way
+    // (`dispatchTrusted()`).
     prepareScriptDispatch = (event) => {
       if (event.#dispatched) {
         throw new DOMException("Invalid event state", "InvalidStateError");
       }
-      if (event.#dispatchedBefore) {
-        event.#isTrusted = false;
-      } else {
-        event.#dispatchedBefore = true;
-      }
+      event.#isTrusted = false;
     };
 
     isTrusted = ObjectGetOwnPropertyDescriptor({
@@ -209,7 +224,6 @@ class Event {
       getAttributes: (event) => event.#attributes,
       getCanceled: (event) => event.#canceledFlag,
       getDispatched,
-      /** `true` also records that the event was dispatched once. */
       setDispatched,
       setPath,
       getStopPropagation: (event) => event.#stopPropagationFlag,
@@ -1080,6 +1094,70 @@ function addEventListenerOptionsConverter(V, prefix) {
   return options;
 }
 
+// The steps of `EventTarget.prototype.dispatchEvent()` after the checks of
+// its arguments. `self` is the target; `thisArg` is what the method was
+// called on (undefined for a bare `dispatchEvent(event)` of the global).
+function dispatchAtTarget(self, thisArg, event) {
+  // This is an optimization to avoid creating an event listener
+  // on each startup.
+  // Stores the flag for checking whether unload is dispatched or not.
+  // This prevents the recursive dispatches of unload events.
+  // See https://github.com/denoland/deno/issues/9201.
+  if (event.type === "unload" && self === globalThis_) {
+    globalThis_[SymbolFor("Deno.isUnloadDispatched")] = true;
+  }
+
+  const data = eventTargetData.get(self);
+  if (data === undefined || !data.listeners[event.type]) {
+    setTarget(event, thisArg);
+    return true;
+  }
+
+  if (getDispatched(event)) {
+    throw new DOMException("Invalid event state", "InvalidStateError");
+  }
+
+  if (event.eventPhase !== Event.NONE) {
+    throw new DOMException("Invalid event state", "InvalidStateError");
+  }
+
+  return dispatch(self, event);
+}
+
+/**
+ * denext: how an extension dispatches an event of its own (one it made, and
+ * that no script has seen) at a target.
+ *
+ * In Deno this is `target.dispatchEvent(event)` and nothing else: the method
+ * is looked up on the target as before, so a program's override of it (on a
+ * subclass, an instance or a prototype) is still called, and `isTrusted` is
+ * what the caller set.
+ *
+ * With `enableUnforgeableEvents()` the dispatch is run from here, without
+ * reading any property of the target: a script that replaces `dispatchEvent`
+ * is not handed the event. The event is trusted, as every event the user
+ * agent fires is; a target of the embedder's node dispatcher is dispatched
+ * at by it.
+ *
+ * @returns {boolean} whether the event was not canceled
+ */
+function dispatchTrusted(target, event) {
+  if (!unforgeableEvents) {
+    return target.dispatchEvent(event);
+  }
+  if (!isEvent(event)) {
+    throw new TypeError("dispatchTrusted: parameter 2 is not of type 'Event'.");
+  }
+  if (getDispatched(event)) {
+    throw new DOMException("Invalid event state", "InvalidStateError");
+  }
+  setIsTrusted(event, true);
+  if (nodeDispatcher !== null && nodeDispatcher.isNode(target)) {
+    return nodeDispatcher.dispatchNode(target, event);
+  }
+  return dispatchAtTarget(target, target, event);
+}
+
 class EventTarget {
   constructor() {
     // eventTargetData is allocated lazily on first addEventListener (or via
@@ -1214,31 +1292,7 @@ class EventTarget {
     if (unforgeableEvents) {
       prepareScriptDispatch(event);
     }
-
-    // This is an optimization to avoid creating an event listener
-    // on each startup.
-    // Stores the flag for checking whether unload is dispatched or not.
-    // This prevents the recursive dispatches of unload events.
-    // See https://github.com/denoland/deno/issues/9201.
-    if (event.type === "unload" && self === globalThis_) {
-      globalThis_[SymbolFor("Deno.isUnloadDispatched")] = true;
-    }
-
-    const data = eventTargetData.get(self);
-    if (data === undefined || !data.listeners[event.type]) {
-      setTarget(event, this);
-      return true;
-    }
-
-    if (getDispatched(event)) {
-      throw new DOMException("Invalid event state", "InvalidStateError");
-    }
-
-    if (event.eventPhase !== Event.NONE) {
-      throw new DOMException("Invalid event state", "InvalidStateError");
-    }
-
-    return dispatch(self, event);
+    return dispatchAtTarget(self, this, event);
   }
 
   getParent(_event) {
@@ -1852,7 +1906,7 @@ function reportException(error) {
     error,
   });
   // Avoid recursing `reportException()` via error handlers more than once.
-  if (reportExceptionStackedCalls > 1 || globalThis_.dispatchEvent(event)) {
+  if (reportExceptionStackedCalls > 1 || dispatchTrusted(globalThis_, event)) {
     core.reportUnhandledException(error);
   }
   reportExceptionStackedCalls--;
@@ -1880,6 +1934,7 @@ return {
   CustomEvent,
   defineEventHandler,
   dispatch,
+  dispatchTrusted,
   enableUnforgeableEvents,
   ErrorEvent,
   Event,
@@ -1897,6 +1952,8 @@ return {
   saveGlobalThisReference,
   setEventTargetData,
   setIsTrusted,
+  setNodeDispatcher,
   setTarget,
+  unforgeableEventsEnabled,
 };
 })();

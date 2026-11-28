@@ -31,6 +31,7 @@ const { URL } = core.loadExtScript("ext:deno_web/00_url.js");
 const { DOMException } = core.loadExtScript("ext:deno_web/01_dom_exception.js");
 const {
   defineEventHandler,
+  dispatchTrusted,
   EventTarget,
   setIsTrusted,
 } = core.loadExtScript("ext:deno_web/02_event.js");
@@ -291,7 +292,7 @@ class EventSource extends EventTarget {
       return;
     }
     this.#readyState = OPEN;
-    this.dispatchEvent(new Event("open"));
+    dispatchTrusted(this, new Event("open"));
 
     let data = "";
     let eventType = "";
@@ -322,7 +323,7 @@ class EventSource extends EventTarget {
           data = "";
           eventType = "";
           if (this.#readyState !== CLOSED) {
-            this.dispatchEvent(event);
+            dispatchTrusted(this, event);
           }
         } else if (StringPrototypeStartsWith(chunk, ":")) {
           continue;
@@ -378,7 +379,7 @@ class EventSource extends EventTarget {
       return;
     }
     this.#readyState = CONNECTING;
-    this.dispatchEvent(new Event("error"));
+    dispatchTrusted(this, new Event("error"));
     this.#reconnectionTimerId = core.createSystemTimer(
       () => {
         if (this.#readyState !== CONNECTING) {
@@ -394,7 +395,7 @@ class EventSource extends EventTarget {
   #failConnection() {
     if (this.#readyState !== CLOSED) {
       this.#readyState = CLOSED;
-      this.dispatchEvent(new Event("error"));
+      dispatchTrusted(this, new Event("error"));
     }
   }
 

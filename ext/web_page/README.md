@@ -195,26 +195,29 @@ of its own:
   subclass getter or prototype can shadow it.
 - `dispatchEvent()` takes only an event (not a `Proxy` of one, nor an object
   that inherits from one), refuses one that is being dispatched, and a script's
-  dispatch is untrusted: on a node always, and on any other target (the window,
-  a `WebSocket`, a new `EventTarget`) for every event that was dispatched
-  before. So a trusted event a listener received cannot be sent on a second
-  trip, and cannot be retargeted on its way.
+  dispatch is untrusted, always and on every target (a node, the window, a
+  `WebSocket`, a new `EventTarget`). So a trusted event a listener received
+  cannot be sent on a second trip, and cannot be retargeted on its way.
+- The runtime's own events do not pass through a `dispatchEvent` a page can
+  replace (on the object, on its interface's prototype or on
+  `EventTarget.prototype`). The web extensions (`WebSocket`, `EventSource`,
+  `AbortSignal`, `MessagePort`, `BroadcastChannel`, `FileReader`, the WebRTC
+  interfaces) and this crate (the window's `load`, `error`, `unhandledrejection`
+  and `rejectionhandled`) dispatch with `02_event.js`'s `dispatchTrusted()`,
+  which here runs the dispatch itself, reads no property of the target and marks
+  the event trusted, as a browser's are. `00_dom.js` registers its dispatch
+  along the tree there (`setNodeDispatcher()`) for targets that are nodes; its
+  own node events never used the method. A page that replaces `dispatchEvent` is
+  therefore handed only what scripts dispatch.
 - The same module removes what `deno_web` has for Deno and a browser does not
   (`Deno.inspect`'s hook on the event interfaces,
   `EventTarget.prototype.getParent`, `Event.prototype.initialized`), makes the
   members enumerable and the phase constants values. The page's console
   therefore prints an event as a plain object.
 
-What is left: the web extensions dispatch their trusted events by calling the
-target's `dispatchEvent`, which a page can replace (on the object or on
-`EventTarget.prototype`). A page that does receives such an event before its
-first dispatch and can dispatch it once, still trusted, at a target that is not
-a node (the window included). It chooses neither the interface nor the type
-(`abort`, `message`, `open`, `close`, `error`, and the type of a server-sent
-event), and no node listener sees it trusted. No decision of the host rests on
-`isTrusted`: what a click does is the same for a script's click and the host's
-`click()`, and a label only passes the flag of its click on to the click it
-sends its control.
+No decision of the host rests on `isTrusted`: what a click does is the same for
+a script's click and the host's `click()`, and a label only passes the flag of
+its click on to the click it sends its control.
 
 ## Node handles
 

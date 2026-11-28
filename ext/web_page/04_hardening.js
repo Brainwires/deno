@@ -6,8 +6,10 @@
 // - Trust. `02_event.js` keeps an event's slots in private fields and the
 //   listener lists in a weak map, so a page reaches neither. Here it is told
 //   that scripts are hostile: `isTrusted` becomes an own, non-configurable
-//   accessor of every event ([LegacyUnforgeable]), and `dispatchEvent()`
-//   takes the trust of an event that was dispatched before.
+//   accessor of every event ([LegacyUnforgeable]), `dispatchEvent()` takes
+//   the trust of every event, and the runtime's own events are dispatched
+//   without it (`dispatchTrusted()`), so a page that replaces the method is
+//   never handed one.
 // - Shape. The members `deno_web` has for Deno and a browser does not have
 //   are removed (`Deno.inspect`'s hook, `EventTarget.prototype.getParent`,
 //   `Event.prototype.initialized`, the `isTrusted` of the prototype), the

@@ -51,8 +51,13 @@ const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
 const { DOMException } = core.loadExtScript(
   "ext:deno_web/01_dom_exception.js",
 );
-const { defineEventHandler, Event, EventTarget, setIsTrusted } = core
-  .loadExtScript("ext:deno_web/02_event.js");
+const {
+  defineEventHandler,
+  dispatchTrusted,
+  Event,
+  EventTarget,
+  setIsTrusted,
+} = core.loadExtScript("ext:deno_web/02_event.js");
 const { TransformStream } = core.loadExtScript("ext:deno_web/06_streams.js");
 const cryptoMod = core.loadExtScript("ext:deno_crypto/00_crypto.js");
 const transform = core.loadExtScript(
@@ -488,7 +493,7 @@ function decryptBytes(state, bytes, frame) {
         frame,
       });
       setIsTrusted(event, true);
-      state.target.dispatchEvent(event);
+      dispatchTrusted(state.target, event);
       return null;
     }
   });

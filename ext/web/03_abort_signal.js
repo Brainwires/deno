@@ -30,10 +30,12 @@ const { createFilteredInspectProxy } = core.loadExtScript(
 );
 const {
   defineEventHandler,
+  dispatchTrusted,
   Event,
   EventTarget,
   listenerCount,
   setIsTrusted,
+  unforgeableEventsEnabled,
 } = core.loadExtScript("ext:deno_web/02_event.js");
 
 const add = Symbol("[[add]]");
@@ -202,7 +204,13 @@ class AbortSignal extends EventTarget {
     if (listenerCount(this, "abort") > 0) {
       const event = new Event("abort");
       setIsTrusted(event, true);
-      super.dispatchEvent(event);
+      // denext: where scripts are not trusted (ext/web_page) the dispatch
+      // reads no property a script can replace; in Deno it is as it was.
+      if (unforgeableEventsEnabled()) {
+        dispatchTrusted(this, event);
+      } else {
+        super.dispatchEvent(event);
+      }
     }
 
     // release strong references from source signals now that abort has been delivered

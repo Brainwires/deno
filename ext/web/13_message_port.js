@@ -70,6 +70,7 @@ function getCreateFilteredInspectProxy() {
 
 const {
   defineEventHandler,
+  dispatchTrusted,
   Event,
   EventTarget,
   MessageEvent,
@@ -214,7 +215,7 @@ function dispatchPortMessageData(target, data) {
   } catch (err) {
     const event = new MessageEvent("messageerror", { data: err });
     setIsTrusted(event, true);
-    target.dispatchEvent(event);
+    dispatchTrusted(target, event);
     return false;
   }
   const event = new MessageEvent("message", {
@@ -229,7 +230,7 @@ function dispatchPortMessageData(target, data) {
     ),
   });
   setIsTrusted(event, true);
-  target.dispatchEvent(event);
+  dispatchTrusted(target, event);
   return true;
 }
 

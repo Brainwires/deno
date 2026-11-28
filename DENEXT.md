@@ -22701,10 +22701,15 @@ where the changes are discussed.
        ([LegacyUnforgeable]) and Chrome have it, so no own property, class
        field, subclass or prototype shadows it; `dispatchEvent()` refuses what
        is not an event (a `Proxy` of one, an object inheriting from one) and an
-       event on its way, and takes the trust of an event that was dispatched
-       before, so a trusted event a listener received cannot be replayed or
-       retargeted. `Node.prototype.dispatchEvent` checks the same brand. It then
-       removes what `deno_web` has for Deno and a browser does not have:
+       event on its way, and takes the trust of every event, so a trusted event
+       a listener received cannot be replayed or retargeted.
+       `Node.prototype.dispatchEvent` checks the same brand. The runtime's own
+       events go through item 557's `dispatchTrusted()` (the window's `load`,
+       `error`, `unhandledrejection` and `rejectionhandled` here; `00_dom.js`
+       registers its tree dispatch with `setNodeDispatcher()`), so a page that
+       replaces `dispatchEvent` on an object or a prototype is never handed one
+       (test `trusted_events_bypass_a_replaced_dispatch_event`). It then removes
+       what `deno_web` has for Deno and a browser does not have:
        `Symbol.for("Deno.privateCustomInspect")` on `EventTarget`, `Event`,
        `CustomEvent`, `ErrorEvent`, `CloseEvent`, `MessageEvent`,
        `ProgressEvent` and `PromiseRejectionEvent`,
@@ -22712,13 +22717,9 @@ where the changes are discussed.
        prototype's `isTrusted`; makes the members of those prototypes enumerable
        and `NONE` / `CAPTURING_PHASE` / `AT_TARGET` / `BUBBLING_PHASE`
        constants. Nothing of the extensions reads what is removed; the page's
-       console prints an event as a plain object. Left (README): the extensions
-       dispatch their trusted events by calling the target's `dispatchEvent`, so
-       a page that replaces that method receives one before its first dispatch
-       and can send it once, still trusted, to a target that is not a node; it
-       chooses neither its interface nor its type. The other `deno_web`
-       interfaces keep their Web IDL brand and state in own symbol properties
-       and `Deno.inspect`'s hook on their prototypes.
+       console prints an event as a plain object. Left (README): the other
+       `deno_web` interfaces keep their Web IDL brand and state in own symbol
+       properties and `Deno.inspect`'s hook on their prototypes.
      - **The binding.** A node crosses as two `u32`s, the halves of
        `NodeId::to_bits()` (arena index, generation); node-returning ops write
        into a shared `Uint32Array`. Traversal and read ops are fast calls; the
@@ -22794,7 +22795,27 @@ where the changes are discussed.
        non-configurable accessor ([LegacyUnforgeable], which Deno does not do
        for its cost), the getter throws on what is not an event, and
        `dispatchEvent()` checks the dispatch flag before its no-listener
-       shortcut and clears `isTrusted` of an event that was dispatched before.
+       shortcut and clears `isTrusted`, always (the DOM Standard's step).
+     - **`dispatchTrusted(target, event)`** (new): how an extension dispatches
+       an event of its own. In Deno it is `target.dispatchEvent(event)`, the
+       same property lookup as before, so a program's override of
+       `dispatchEvent` (subclass, instance, prototype) is called as it was and
+       `isTrusted` is what the call site set. With `enableUnforgeableEvents()`
+       it runs the dispatch itself without reading a property of the target, and
+       marks the event trusted: a script that replaces `dispatchEvent` was
+       handed the extensions' trusted events before their dispatch and could
+       send them on, still trusted. `setNodeDispatcher(isNode, dispatchNode)`
+       (one call, by the embedder's extension script) names the targets that are
+       dispatched at by the embedder's algorithm instead (item 556's nodes);
+       `unforgeableEventsEnabled()` is for `AbortSignal`, whose
+       `super.dispatchEvent()` stays as it is in Deno. Call sites moved, all of
+       them events the extension itself made: `reportException()` (the global's
+       `error`), `FileReader` (8), `BroadcastChannel`, `AbortSignal`,
+       `MessagePort` / `messageerror` (2), `WebSocket` (14; its `message` events
+       already used the module's `dispatch()`), `EventSource` (4), and
+       `ext/webrtc`'s two `fire()` helpers, the SFrame `error` and
+       `keyframerequest`. `receiveTransform()`'s callback is `99_main.js`'s and
+       is unchanged.
      - **What a Deno program can observe.** (1)
        `Reflect.ownKeys(new Event("x"))` is `[]`, and a target with listeners or
        `on*` handlers has no property for them. (2) The getters and methods of
@@ -22816,7 +22837,9 @@ where the changes are discussed.
      - Tests: `tests/unit/event_test.ts` `eventStateIsNotInOwnProperties`,
        `tests/unit/event_target_test.ts` `listenersAreNotOwnProperties`,
        `dispatchEventTakesOnlyEvents`; item 556's `is_trusted_cannot_be_forged`
-       for `enableUnforgeableEvents()`.
+       for `enableUnforgeableEvents()`, and its
+       `trusted_events_bypass_a_replaced_dispatch_event` for
+       `dispatchTrusted()`.
      - User-facing note: an event can no longer be wrapped in a `Proxy` (or used
        as a prototype) and passed to `dispatchEvent()`; listeners added through
        a `Proxy` of an event target are not called for events the runtime

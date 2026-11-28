@@ -1419,6 +1419,148 @@ async fn is_trusted_cannot_be_forged() {
   assert!(page.take_uncaught_errors().is_empty());
 }
 
+// The runtime's own events never pass through a `dispatchEvent` a page can
+// replace: on the object, on its interface's prototype or on
+// `EventTarget.prototype`. A page that replaces them is handed nothing, the
+// listeners still get the event, trusted, and what a script dispatches
+// itself never is.
+#[tokio::test(flavor = "current_thread")]
+async fn trusted_events_bypass_a_replaced_dispatch_event() {
+  let mut options = options(r#"<div id="d"><button id="b">b</button></div>"#);
+  // Allowed by name and refused by the deny list: an `error` and a `close`.
+  options.net_allow = vec!["127.0.0.1:1".to_string()];
+  let mut page = PageRuntime::new(options).unwrap();
+  run(
+    &mut page,
+    r#"globalThis.captured = [];
+      globalThis.seen = [];
+      globalThis.realDispatch = EventTarget.prototype.dispatchEvent;
+      const capture = (where) =>
+        function (event) {
+          captured.push([where, event.type, event.isTrusted]);
+          // What a page would do with one: send it to the window.
+          Reflect.apply(realDispatch, window, [event]);
+          return true;
+        };
+      const replace = (object, where) => {
+        Object.defineProperty(object, "dispatchEvent", {
+          value: capture(where),
+          writable: true,
+          configurable: true,
+        });
+      };
+      replace(EventTarget.prototype, "EventTarget.prototype");
+      replace(Node.prototype, "Node.prototype");
+      replace(WebSocket.prototype, "WebSocket.prototype");
+      replace(AbortSignal.prototype, "AbortSignal.prototype");
+      replace(window, "window");
+      replace(document, "document");
+      const record = (name) => (e) => {
+        seen.push([name, e.type, e.isTrusted, e.target === e.currentTarget]);
+      };
+      // A listener of the window would see a captured event sent there.
+      for (
+        const type of [
+          "open", "message", "close", "abort", "click", "unhandledrejection",
+        ]
+      ) {
+        window.addEventListener(type, (e) => {
+          if (e.target === window) {
+            seen.push(["window", e.type, e.isTrusted, true]);
+          }
+        });
+      }
+      window.addEventListener("error", (e) => {
+        if (e instanceof ErrorEvent || e.target === window) {
+          seen.push(["window", e.type, e.isTrusted, e.target === window]);
+        }
+      });
+
+      const ws = new WebSocket("ws://127.0.0.1:1/");
+      replace(ws, "a WebSocket");
+      ws.addEventListener("error", record("ws"));
+      ws.onclose = record("ws");
+
+      const timeout = AbortSignal.timeout(1);
+      replace(timeout, "a timeout signal");
+      timeout.addEventListener("abort", record("timeout"));
+      const controller = new AbortController();
+      replace(controller.signal, "a signal");
+      controller.signal.onabort = record("signal");
+      controller.abort();
+
+      globalThis.b = document.getElementById("b");
+      replace(b, "a button");
+      b.addEventListener("click", record("button"));
+
+      // The window's own events: an uncaught error, an unhandled rejection.
+      setTimeout(() => {
+        throw new Error("from a timer");
+      }, 0);
+      Promise.reject(new Error("from a promise"));
+      // Keeps the loop alive for the timeout signal, whose timer does not.
+      setTimeout(() => {}, 300);"#,
+  );
+  page.click(by_id(&page, "b")).unwrap();
+  assert_eq!(
+    page.run_until_idle(Duration::from_secs(20)).await.unwrap(),
+    Idle::Quiescent
+  );
+  assert_eq!(eval(&mut page, "captured"), json!([]));
+  let mut seen = eval(&mut page, "seen")
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|entry| entry.to_string())
+    .collect::<Vec<_>>();
+  seen.sort();
+  assert_eq!(
+    seen,
+    [
+      r#"["button","click",true,true]"#,
+      r#"["signal","abort",true,true]"#,
+      r#"["timeout","abort",true,true]"#,
+      r#"["window","error",true,true]"#,
+      r#"["window","unhandledrejection",true,true]"#,
+      r#"["ws","close",true,true]"#,
+      r#"["ws","error",true,true]"#,
+    ]
+  );
+
+  // The replaced methods are what a script's own call reaches, and the real
+  // one never dispatches a trusted event: not a new one, and not one a
+  // listener was given.
+  assert_eq!(
+    eval(
+      &mut page,
+      r#"(() => {
+        captured.length = 0;
+        seen.length = 0;
+        b.dispatchEvent(new Event("click"));
+        const own = captured.map((entry) => entry[0]);
+        let kept = null;
+        const signal = AbortSignal.abort();
+        const controller = new AbortController();
+        controller.signal.addEventListener("abort", (e) => {
+          kept = e;
+        });
+        controller.abort();
+        const target = new EventTarget();
+        let replayed = null;
+        target.addEventListener("abort", (e) => {
+          replayed = e.isTrusted;
+        });
+        const before = kept.isTrusted;
+        Reflect.apply(realDispatch, target, [kept]);
+        return [own, signal.aborted, before, replayed, kept.isTrusted];
+      })()"#,
+    ),
+    json!([["a button"], true, true, false, false])
+  );
+  let _ = page.take_console_messages();
+  assert!(page.take_uncaught_errors().is_empty());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn event_interfaces_look_like_a_browsers() {
   let mut page = page(r#"<button id="b">b</button>"#);

@@ -66,6 +66,7 @@ const {
   CloseEvent,
   defineEventHandler,
   dispatch,
+  dispatchTrusted,
   ErrorEvent,
   Event,
   EventTarget,
@@ -569,18 +570,18 @@ class WebSocket extends EventTarget {
               this[_readyState] = CLOSED;
 
               const errEvent = new ErrorEvent("error");
-              this.dispatchEvent(errEvent);
+              dispatchTrusted(this, errEvent);
 
               emitWebSocketClosed(this);
               const event = new CloseEvent("close", { code: 1006 });
-              this.dispatchEvent(event);
+              dispatchTrusted(this, event);
               core.tryClose(this[_rid]);
             },
           );
         } else {
           this[_readyState] = OPEN;
           const event = new Event("open");
-          this.dispatchEvent(event);
+          dispatchTrusted(this, event);
 
           this[_eventLoop]();
         }
@@ -593,7 +594,7 @@ class WebSocket extends EventTarget {
           "error",
           { error: err, message: ErrorPrototypeToString(err) },
         );
-        this.dispatchEvent(errorEv);
+        dispatchTrusted(this, errorEv);
 
         if (this[_cancelHandle]) {
           core.tryClose(this[_cancelHandle]);
@@ -603,7 +604,7 @@ class WebSocket extends EventTarget {
 
         emitWebSocketClosed(this);
         const closeEv = new CloseEvent("close", { code: 1006 });
-        this.dispatchEvent(closeEv);
+        dispatchTrusted(this, closeEv);
       },
     );
   }
@@ -768,7 +769,7 @@ class WebSocket extends EventTarget {
             wasClean: false,
             code: 1006,
           });
-          this.dispatchEvent(closeEv);
+          dispatchTrusted(this, closeEv);
           core.tryClose(this[_rid]);
         },
         CLOSE_HANDSHAKE_TIMEOUT_MS,
@@ -790,11 +791,11 @@ class WebSocket extends EventTarget {
             error: err,
             message: ErrorPrototypeToString(err),
           });
-          this.dispatchEvent(errorEv);
+          dispatchTrusted(this, errorEv);
 
           emitWebSocketClosed(this);
           const closeEv = new CloseEvent("close", { code: 1006 });
-          this.dispatchEvent(closeEv);
+          dispatchTrusted(this, closeEv);
           core.tryClose(this[_rid]);
         },
       );
@@ -817,7 +818,7 @@ class WebSocket extends EventTarget {
 
         emitWebSocketClosed(this);
         const event = new CloseEvent("close", { code: 1006 });
-        this.dispatchEvent(event);
+        dispatchTrusted(this, event);
         core.tryClose(rid);
         break;
       }
@@ -883,11 +884,11 @@ class WebSocket extends EventTarget {
             error,
             message,
           });
-          this.dispatchEvent(errorEv);
+          dispatchTrusted(this, errorEv);
 
           emitWebSocketClosed(this);
           const closeEv = new CloseEvent("close", { code: 1006 });
-          this.dispatchEvent(closeEv);
+          dispatchTrusted(this, closeEv);
           core.tryClose(rid);
           break;
         }
@@ -926,7 +927,7 @@ class WebSocket extends EventTarget {
             code: code,
             reason,
           });
-          this.dispatchEvent(event);
+          dispatchTrusted(this, event);
           core.tryClose(rid);
           break;
         }
@@ -1003,14 +1004,14 @@ class WebSocket extends EventTarget {
                   const errEvent = new ErrorEvent("error", {
                     message: reason,
                   });
-                  this.dispatchEvent(errEvent);
+                  dispatchTrusted(this, errEvent);
 
                   const event = new CloseEvent("close", {
                     wasClean: false,
                     code: 1001,
                     reason,
                   });
-                  this.dispatchEvent(event);
+                  dispatchTrusted(this, event);
                   core.tryClose(this[_rid]);
                 } else {
                   if (this[_idleTimeoutTimeout]) {

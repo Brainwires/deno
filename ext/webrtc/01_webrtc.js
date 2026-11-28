@@ -162,6 +162,7 @@ const { DOMException } = core.loadExtScript(
 );
 const {
   defineEventHandler,
+  dispatchTrusted,
   Event,
   EventTarget,
   MessageEvent,
@@ -185,7 +186,7 @@ const illegalConstructorKey = Symbol("illegalConstructorKey");
 
 function fire(target, event) {
   setIsTrusted(event, true);
-  target.dispatchEvent(event);
+  dispatchTrusted(target, event);
 }
 
 // An event handler IDL attribute (`onopen`, ...) that checks its `this`, as
