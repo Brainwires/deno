@@ -6,6 +6,11 @@ const {
   op_fetch,
   op_fetch_promise_is_settled,
   op_fetch_send,
+  op_fetch_web_failed,
+  op_fetch_web_preflight,
+  op_fetch_web_redirect,
+  op_fetch_web_request,
+  op_fetch_web_response,
   op_pipe,
   op_wasm_streaming_set_url,
 } = core.ops;
@@ -52,6 +57,7 @@ const {
 const { extractBody, InnerBody } = core.loadExtScript(
   "ext:deno_fetch/22_body.js",
 );
+const { webOriginMode } = core.loadExtScript("ext:deno_fetch/20_headers.js");
 const { processUrlList, Request, toInnerRequest } = core.loadExtScript(
   "ext:deno_fetch/23_request.js",
 );
@@ -431,6 +437,80 @@ function addNodeFetchDefaultHeaders(headerList) {
   }
 }
 
+// ============================================================================
+// denext: an embedder's web-origin mode (`cors.rs`).
+//
+// With a `deno_fetch::EmbedderWebOrigin` in the op state (an embedder that
+// runs web pages; never Deno), `mainFetch` and `httpRedirectFetch` follow
+// the Fetch Standard's origin rules. The decisions are made in Rust, from
+// the request as `webRequestArgs` describes it: what happens here is the
+// order of the standard's steps and the filtered response. Everything is
+// behind `webOriginMode()`, which is `false` in Deno.
+// ============================================================================
+
+/**
+ * A request as the web-origin ops take it. `webTainting` (the request's
+ * response tainting) and `webSafeRequest` (no unsafe-request flag: an
+ * `EventSource`) are fields only this mode sets on an inner request.
+ * @param {InnerRequest} req
+ */
+function webRequestArgs(req) {
+  return {
+    __proto__: null,
+    method: req.method,
+    urlList: processUrlList(req.urlList, req.urlListProcessed),
+    mode: req.mode ?? "cors",
+    credentials: req.credentialsMode ?? "same-origin",
+    redirect: req.redirectMode,
+    referrer: req.referrer ?? "client",
+    referrerPolicy: req.referrerPolicy ?? "",
+    tainting: req.webTainting ?? "basic",
+    unsafeRequest: req.webSafeRequest !== true,
+  };
+}
+
+/**
+ * A request whose response tainting is "cors" ended in a network error: the
+ * preflight cache forgets what it holds for it.
+ */
+function webRequestFailed(web) {
+  if (web !== null && web.tainting === "cors") {
+    op_fetch_web_failed(web);
+  }
+}
+
+/**
+ * https://fetch.spec.whatwg.org/#concept-filtered-response-opaque and
+ * https://fetch.spec.whatwg.org/#concept-filtered-response-opaque-redirect:
+ * no status, no headers, no body. An opaque response has no URL either.
+ * @param {"opaque" | "opaqueredirect"} type
+ * @param {string[]} urlList
+ * @returns {InnerResponse}
+ */
+function webOpaqueResponse(type, urlList) {
+  return {
+    type,
+    body: null,
+    headerList: [],
+    urlList,
+    status: 0,
+    statusMessage: "",
+    aborted: false,
+    bodyDecoded: false,
+    url() {
+      if (this.urlList.length == 0) return null;
+      return this.urlList[this.urlList.length - 1];
+    },
+  };
+}
+
+function hasLocationHeader(headerList) {
+  for (let i = 0; i < headerList.length; i++) {
+    if (byteLowerCase(headerList[i][0]) === "location") return true;
+  }
+  return false;
+}
+
 async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
   // https://fetch.spec.whatwg.org/#main-fetch step 5: if the request should be
   // blocked due to a bad port, return a network error before any network I/O
@@ -480,6 +560,34 @@ async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
     };
   }
 
+  // denext: in web-origin mode, main fetch's steps 7 to 11 (the referrer,
+  // the response tainting the request's mode gives this URL, or a network
+  // error) and the CORS-preflight fetch, before anything is sent.
+  let web = null;
+  let webPlan = null;
+  if (webOriginMode()) {
+    web = webRequestArgs(req);
+    webPlan = op_fetch_web_request(web, req.headerList);
+    if (webPlan.error !== null) return networkError(webPlan.error);
+    web.tainting = req.webTainting = webPlan.tainting;
+    web.referrer = req.referrer = webPlan.referrer;
+    web.referrerPolicy = req.referrerPolicy = webPlan.referrerPolicy;
+    if (webPlan.preflight) {
+      const cancelRid = core.createCancelHandle();
+      const onPreflightAbort = () => core.tryClose(cancelRid);
+      terminator[abortSignal.add](onPreflightAbort);
+      let verdict;
+      try {
+        verdict = await op_fetch_web_preflight(web, req.headerList, cancelRid);
+      } finally {
+        terminator[abortSignal.remove](onPreflightAbort);
+        core.tryClose(cancelRid);
+      }
+      if (terminator.aborted) return abortedNetworkError();
+      if (verdict.error !== null) return networkError(verdict.error);
+    }
+  }
+
   /** @type {ReadableStream<Uint8Array> | Uint8Array | null} */
   let reqBody = null;
   let reqRid = null;
@@ -517,8 +625,11 @@ async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
 
   const { requestRid, cancelHandleRid } = op_fetch(
     req.method,
-    req.currentUrl(),
-    req.headerList,
+    // denext: in web-origin mode, the URL without credentials, and the
+    // header list without what a page may not set, with `Referer` and
+    // `Origin`
+    webPlan !== null ? webPlan.url : req.currentUrl(),
+    webPlan !== null ? webPlan.headers : req.headerList,
     clientRid,
     reqBody !== null || reqRid !== null,
     reqBody,
@@ -633,6 +744,7 @@ async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
         errorText: err && err.message ? String(err.message) : String(err),
       });
     }
+    webRequestFailed(web);
     if (terminator.aborted) return abortedNetworkError();
     throw err;
   } finally {
@@ -650,6 +762,7 @@ async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
         errorText: resp.error[0],
       });
     }
+    webRequestFailed(web);
     // `resp.error` is `[detail, cause]`, where `detail` is the full reqwest
     // message and `cause` is the underlying transport error detail. Mirror
     // Node's shape: `TypeError: "fetch failed"` with the detail in `.cause`.
@@ -669,6 +782,19 @@ async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
     // the rid manually, otherwise it leaks and trips the test sanitizer.
     core.tryClose(resp.responseRid);
     return abortedNetworkError();
+  }
+
+  // denext: in web-origin mode, the CORS check (HTTP fetch, step 4.5),
+  // before anything of the response is used, a redirect included; and the
+  // header list of the filtered response, for the end of this function.
+  let webHeaders = null;
+  if (web !== null) {
+    const checked = op_fetch_web_response(web, resp.headers);
+    if (checked.error !== null) {
+      core.tryClose(resp.responseRid);
+      return networkError(checked.error);
+    }
+    webHeaders = checked.headers;
   }
 
   processUrlList(req.urlList, req.urlListProcessed);
@@ -736,6 +862,9 @@ async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
           "Encountered redirect while redirect mode is set to 'error'",
         );
       case "follow":
+        // denext: in web-origin mode a redirect status without a location
+        // is the response itself, filtered like any other (below)
+        if (web !== null && !hasLocationHeader(resp.headers)) break;
         core.close(resp.responseRid);
         return httpRedirectFetch(
           req,
@@ -746,8 +875,23 @@ async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
             : null,
         );
       case "manual":
+        // denext: in web-origin mode, an opaque-redirect filtered response
+        if (web !== null) {
+          core.close(resp.responseRid);
+          return webOpaqueResponse(
+            "opaqueredirect",
+            [...new SafeArrayIterator(req.urlListProcessed)],
+          );
+        }
         break;
     }
+  }
+
+  // denext: in web-origin mode, a "no-cors" request to another origin gets
+  // an opaque filtered response; the body is not read
+  if (web !== null && web.tainting === "opaque") {
+    core.close(resp.responseRid);
+    return webOpaqueResponse("opaque", []);
   }
 
   if (nullBodyStatus(response.status)) {
@@ -792,6 +936,12 @@ async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
     }
   }
 
+  // denext: in web-origin mode, the basic or CORS filtered response
+  if (web !== null) {
+    response.headerList = webHeaders;
+    if (web.tainting === "cors") response.type = "cors";
+  }
+
   if (recursive) return response;
 
   if (response.urlList.length === 0) {
@@ -822,10 +972,18 @@ function httpRedirectFetch(request, response, terminator, inspectorCtx = null) {
   }
 
   const currentURL = new URL(request.currentUrl());
-  const locationURL = new URL(
-    locationHeaders[0][1],
-    response.url() ?? undefined,
-  );
+  let locationURL;
+  try {
+    locationURL = new URL(
+      locationHeaders[0][1],
+      response.url() ?? undefined,
+    );
+  } catch (err) {
+    // denext: in web-origin mode a location that is not a URL is a network
+    // error (the exception's message quotes a header of the response)
+    if (webOriginMode()) return networkError("Invalid redirect location");
+    throw err;
+  }
   if (locationURL.hash === "") {
     locationURL.hash = currentURL.hash;
   }
@@ -836,6 +994,20 @@ function httpRedirectFetch(request, response, terminator, inspectorCtx = null) {
     return networkError("Maximum number of redirects (20) reached");
   }
   request.redirectCount++;
+  // denext: in web-origin mode, steps 8 and 9 of HTTP-redirect fetch (no
+  // credentials in the URL of a cross-origin redirect) and step 18 (the
+  // referrer policy the redirect response sets)
+  if (webOriginMode()) {
+    const redirect = op_fetch_web_redirect(
+      webRequestArgs(request),
+      locationURL.href,
+      response.headerList,
+    );
+    if (redirect.error !== null) return networkError(redirect.error);
+    if (redirect.referrerPolicy !== "") {
+      request.referrerPolicy = redirect.referrerPolicy;
+    }
+  }
   if (
     response.status !== 303 &&
     request.body !== null &&
@@ -984,9 +1156,13 @@ function fetch(input, init = undefined) {
             }
             // 12.3.
             if (response.type === "error") {
-              const err = new TypeError(
-                "Fetch failed: " + (response.error ?? "unknown error"),
-              );
+              // denext: a web page learns nothing about why (the reason
+              // went to the embedder, `EmbedderWebOrigin`'s reporter)
+              const err = webOriginMode()
+                ? new TypeError("Failed to fetch")
+                : new TypeError(
+                  "Fetch failed: " + (response.error ?? "unknown error"),
+                );
               reject(err);
               requestObject.signal[abortSignal.remove](onabort);
               return;
@@ -1179,5 +1355,11 @@ function handleWasmStreaming(source, rid) {
   }
 }
 
-return { fetch, handleWasmStreaming, mainFetch, setNodeProxyRouter };
+return {
+  fetch,
+  handleWasmStreaming,
+  mainFetch,
+  setNodeProxyRouter,
+  webOriginMode,
+};
 })();

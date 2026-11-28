@@ -1,6 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 pub mod cookies;
+pub mod cors;
 pub mod deny_addresses;
 pub mod dns;
 mod fs_fetch_handler;
@@ -33,6 +34,7 @@ use async_compression::tokio::bufread::ZlibDecoder;
 use bytes::Bytes;
 use cookies::CookieError;
 // Re-export data_url
+pub use cors::EmbedderWebOrigin;
 pub use data_url;
 use data_url::DataUrl;
 use deno_core::AsyncRefCell;
@@ -182,6 +184,14 @@ deno_core::extension!(deno_fetch,
     op_cookie_parse,
     op_cookie_serialize,
     op_cookie_parse_cookie_header,
+    // denext: an embedder's web-origin mode (`cors.rs`)
+    cors::op_fetch_web_mode,
+    cors::op_fetch_web_header_blocked,
+    cors::op_fetch_web_request,
+    cors::op_fetch_web_preflight,
+    cors::op_fetch_web_response,
+    cors::op_fetch_web_redirect,
+    cors::op_fetch_web_failed,
   ],
   lazy_loaded_js = [
     "20_headers.js",

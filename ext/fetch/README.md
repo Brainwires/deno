@@ -80,3 +80,14 @@ Following ops are provided, which can be accessed through `Deno.ops`:
 - op_utf8_to_byte_string
 - op_fetch_custom_client
 - op_fetch_promise_is_settled
+
+## Web-origin mode (denext)
+
+`fetch()` here is a server's: requests have no origin and every response is
+readable. An embedder that runs web pages puts a `deno_fetch::EmbedderWebOrigin`
+(the page's URL) in the `OpState`; the fetch of that runtime then follows the
+Fetch Standard's origin rules: request modes and credentials modes, forbidden
+methods and request headers, `Origin` and `Referer`, the CORS check, the CORS
+preflight and its cache, redirects across origins, and `basic`, `cors`, `opaque`
+and `opaqueredirect` responses. `cors.rs` has the rules and the notes on what is
+not there (cookies among them). Without the opt-in nothing changes.

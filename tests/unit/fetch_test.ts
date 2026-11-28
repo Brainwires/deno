@@ -3382,3 +3382,46 @@ Deno.test(
     await server.close();
   },
 );
+
+// denext: `deno_fetch`'s web-origin mode (the same-origin policy of a web
+// page: forbidden request headers, the `no-cors` rules, CORS) is an
+// embedder's opt-in. A Deno program is a server: none of it applies.
+Deno.test(function fetchHasNoWebOriginMode() {
+  const request = new Request("http://example.com/", {
+    headers: {
+      "Cookie": "a=b",
+      "Host": "other.example",
+      "Origin": "https://origin.example",
+      "Sec-Fetch-Site": "none",
+    },
+    referrer: "https://elsewhere.example/",
+  });
+  assertEquals(request.headers.get("cookie"), "a=b");
+  assertEquals(request.headers.get("host"), "other.example");
+  assertEquals(request.headers.get("origin"), "https://origin.example");
+  assertEquals(request.headers.get("sec-fetch-site"), "none");
+  assertEquals(request.referrer, "https://elsewhere.example/");
+  request.headers.delete("Cookie");
+  request.headers.set("Referer", "https://elsewhere.example/");
+  assertEquals(request.headers.has("cookie"), false);
+  assertEquals(request.headers.has("referer"), true);
+
+  // A URL with credentials, and a "no-cors" request of any shape.
+  assertEquals(
+    new Request("http://user:pw@example.com/").url,
+    "http://user:pw@example.com/",
+  );
+  const noCors = new Request("http://example.com/", {
+    mode: "no-cors",
+    method: "PUT",
+    headers: { "X-Custom": "1", "Content-Type": "application/json" },
+  });
+  assertEquals(noCors.method, "PUT");
+  assertEquals(noCors.headers.get("x-custom"), "1");
+  assertEquals(noCors.headers.get("content-type"), "application/json");
+
+  // A response's `Set-Cookie` is the program's to write and to read.
+  const response = new Response("body");
+  response.headers.append("Set-Cookie", "a=b");
+  assertEquals(response.headers.getSetCookie(), ["a=b"]);
+});

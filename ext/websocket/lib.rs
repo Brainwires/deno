@@ -26,6 +26,7 @@ use deno_core::url;
 use deno_error::JsErrorBox;
 use deno_fetch::ClientConnectError;
 use deno_fetch::CreateHttpClientOptions;
+use deno_fetch::EmbedderWebOrigin;
 use deno_fetch::HttpClientCreateError;
 use deno_fetch::HttpClientResource;
 use deno_fetch::Options as FetchOptions;
@@ -547,7 +548,7 @@ async fn op_ws_create_inner(
   unsafely_ignore_certificate_errors: bool,
   client_rid: Option<u32>,
 ) -> Result<CreateResponse, WebsocketError> {
-  let (client, allow_host, deny) = {
+  let (client, allow_host, deny, web_origin) = {
     let mut s = state.borrow_mut();
     s.borrow_mut::<PermissionsContainer>()
       .check_net_connect_url(
@@ -575,7 +576,19 @@ async fn op_ws_create_inner(
     } else {
       (get_or_create_client_from_state(&mut s)?, false)
     };
-    (client, allow_host, EmbedderDenyList::from_state(&s))
+    (
+      client,
+      allow_host,
+      EmbedderDenyList::from_state(&s),
+      EmbedderWebOrigin::from_state(&s),
+    )
+  };
+  // denext: the handshake of a web page (an embedder's web-origin mode)
+  // carries the page's `Origin`, as a browser's does and servers check, and
+  // none of the request headers a page may not set.
+  let headers = match web_origin {
+    Some(web_origin) => Some(web_origin.websocket_headers(headers)),
+    None => headers,
   };
   // denext: the embedder's address deny list holds for the connection
   // whichever client opens it (a `Deno.HttpClient`, one made here for
@@ -1439,6 +1452,83 @@ mod tests {
           .is_ok()
       );
       assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), n + 1);
+    }
+  }
+
+  // denext: with an embedder's web origin in the op state (a web page), the
+  // handshake carries the page's `Origin`, `null` for an opaque one; without
+  // one (Deno) it carries none, as before.
+  #[tokio::test]
+  async fn a_web_page_handshake_carries_its_origin() {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    for (page, expected) in [
+      (
+        Some("https://app.example/dir/page.html"),
+        Some("https://app.example"),
+      ),
+      (
+        Some("http://127.0.0.1:8080/"),
+        Some("http://127.0.0.1:8080"),
+      ),
+      (Some("data:text/html,<p>page</p>"), Some("null")),
+      (None, None),
+    ] {
+      let listener =
+        tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let addr = listener.local_addr().unwrap();
+      // Answers one handshake and gives back what it was sent (and the
+      // socket, which stays open for the client).
+      let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+          request.push(socket.read_u8().await.unwrap());
+        }
+        let request = String::from_utf8_lossy(&request).to_string();
+        let key = request
+          .lines()
+          .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name
+              .eq_ignore_ascii_case("sec-websocket-key")
+              .then(|| value.trim().to_string())
+          })
+          .unwrap();
+        let response = format!(
+          "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+          sec_websocket_accept(&key)
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+        (request, socket)
+      });
+
+      let state = connect_state(None);
+      if let Some(page) = page {
+        state
+          .borrow_mut()
+          .put(EmbedderWebOrigin::new(url::Url::parse(page).unwrap()));
+      }
+      let created =
+        connect(&state, format!("ws://127.0.0.1:{}/", addr.port()), None)
+          .await
+          .unwrap_or_else(|err| panic!("{page:?}: {err}"));
+      assert_eq!(created.status, 101);
+
+      let (request, _socket) = server.await.unwrap();
+      let origins: Vec<String> = request
+        .lines()
+        .filter_map(|line| {
+          let (name, value) = line.split_once(':')?;
+          name
+            .eq_ignore_ascii_case("origin")
+            .then(|| value.trim().to_string())
+        })
+        .collect();
+      let expected: Vec<String> =
+        expected.into_iter().map(String::from).collect();
+      assert_eq!(origins, expected, "{page:?}");
     }
   }
 

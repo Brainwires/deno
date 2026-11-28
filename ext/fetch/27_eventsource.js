@@ -40,7 +40,9 @@ const { TextDecoderStream } = core.loadExtScript(
 );
 const { getLocationHref } = core.loadExtScript("ext:deno_web/12_location.js");
 const { newInnerRequest } = core.loadExtScript("ext:deno_fetch/23_request.js");
-const { mainFetch } = core.loadExtScript("ext:deno_fetch/26_fetch.js");
+const { mainFetch, webOriginMode } = core.loadExtScript(
+  "ext:deno_fetch/26_fetch.js",
+);
 const {
   fillHeaders,
   headerListFromHeaders,
@@ -242,7 +244,10 @@ class EventSource extends EventTarget {
       "request",
     );
 
-    if (this.#headers) {
+    // denext: `headers` is Deno's own. A web page (an embedder's web-origin
+    // mode) has the standard's EventSource: no request headers of its own.
+    const web = webOriginMode();
+    if (this.#headers && !web) {
       fillHeaders(initialHeaders, this.#headers);
     }
 
@@ -253,6 +258,15 @@ class EventSource extends EventTarget {
       null,
       false,
     );
+    if (web) {
+      // https://html.spec.whatwg.org/multipage/server-sent-events.html#dom-eventsource:
+      // a "cors" request, with credentials when `withCredentials` is set,
+      // and without the unsafe-request flag (so no preflight for
+      // `Last-Event-ID`).
+      req.mode = "cors";
+      req.credentialsMode = this.#withCredentials ? "include" : "same-origin";
+      req.webSafeRequest = true;
+    }
 
     /** @type {InnerResponse} */
     let res;

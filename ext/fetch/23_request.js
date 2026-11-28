@@ -42,6 +42,7 @@ const {
   headerListFromHeaders,
   headersFromHeaderList,
   headersFromHeaderListLazyTarget,
+  webOriginMode,
 } = core.loadExtScript("ext:deno_fetch/20_headers.js");
 const { HttpClientPrototype } = core.loadExtScript(
   "ext:deno_fetch/22_http_client.js",
@@ -394,6 +395,15 @@ class Request {
     // 5.
     if (typeof input === "string") {
       const parsedURL = new URL(input, baseURL);
+      // denext: 5.4., for a web page (an embedder's web-origin mode)
+      if (
+        webOriginMode() &&
+        (parsedURL.username !== "" || parsedURL.password !== "")
+      ) {
+        throw new TypeError(
+          "Request cannot be constructed from a URL that includes credentials",
+        );
+      }
       request = newInnerRequest(
         "GET",
         parsedURL.href,
@@ -430,7 +440,11 @@ class Request {
         }
         if (
           (parsedReferrer.protocol === "about:" &&
-            parsedReferrer.pathname === "client")
+            parsedReferrer.pathname === "client") ||
+          // denext: for a web page, a referrer of another origin is the
+          // client's (`cors.rs` holds this again when the request is made)
+          (webOriginMode() && baseURL !== undefined &&
+            parsedReferrer.origin !== new URL(baseURL).origin)
         ) {
           request.referrer = "client";
         } else {
@@ -500,6 +514,18 @@ class Request {
         validateAndNormalizeMethod(method);
     }
 
+    // denext: for a web page, a "no-cors" request has a CORS-safelisted
+    // method, and its headers the "request-no-cors" guard
+    const noCors = request.mode === "no-cors" && webOriginMode();
+    if (
+      noCors && request.method !== "GET" && request.method !== "HEAD" &&
+      request.method !== "POST"
+    ) {
+      throw new TypeError(
+        `'${request.method}' is unsupported in no-cors mode`,
+      );
+    }
+
     // 26.
     if (init.signal !== undefined) {
       signal = init.signal;
@@ -530,7 +556,10 @@ class Request {
     }
 
     // 31.
-    this[_headers] = headersFromHeaderList(request.headerList, "request");
+    this[_headers] = headersFromHeaderList(
+      request.headerList,
+      noCors ? "request-no-cors" : "request",
+    );
 
     // 33.
     if (init.headers || ObjectKeys(init).length > 0) {
