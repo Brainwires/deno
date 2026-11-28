@@ -596,6 +596,26 @@ jobs:
           rustup toolchain install "$tc" --profile minimal --no-self-update ${force_non_host:+"$force_non_host"}
           echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
+      # On macOS and Windows the Makefile only checks that cargo exists
+      # (check-deps). GitHub's images carry rustup; our self-hosted pools give
+      # jobs no rustup (the x64 Windows pools carry a standalone cargo of
+      # laufey's channel), so say plainly what this job has instead of failing
+      # later with the Makefile's "cargo not found".
+      - name: Rust toolchain (macOS, Windows)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v rustup >/dev/null 2>&1; then
+            tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' denext-ci/rust-toolchain.toml)
+            rustup toolchain install "$tc" --profile minimal --no-self-update
+            echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
+          elif command -v cargo >/dev/null 2>&1; then
+            echo "no rustup on this runner; using $(cargo --version)"
+          else
+            echo "::error::no rustup and no cargo on this runner ($RUNNER_NAME): laufey's Makefile needs cargo"; exit 1
+          fi
+
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
