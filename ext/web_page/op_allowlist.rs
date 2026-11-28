@@ -321,11 +321,21 @@ pub(crate) const WEBRTC_OPS: &[&str] = &[
 ];
 
 /// `deno_image`'s op (`ext/image/lib.rs`); `ImageBitmap` is a cppgc object.
-pub(crate) const IMAGE_OPS: &[&str] = &["op_create_image_bitmap"];
+pub(crate) const IMAGE_OPS: &[&str] = &[
+  "op_create_image_bitmap",
+  "op_image_bitmap_color_type",
+  "op_image_bitmap_from_clone_data",
+  "op_image_bitmap_transfer",
+  "op_image_bitmap_receive",
+];
 
 /// `deno_canvas_offscreen`'s op (`ext/canvas/lib.rs`); `OffscreenCanvas` and
 /// `ImageBitmapRenderingContext` are cppgc objects.
-pub(crate) const CANVAS_OPS: &[&str] = &["op_init_canvas"];
+pub(crate) const CANVAS_OPS: &[&str] = &[
+  "op_init_canvas",
+  "op_offscreen_canvas_transfer",
+  "op_offscreen_canvas_receive",
+];
 
 /// This crate's ops (`lib.rs`).
 pub(crate) const PAGE_OPS: &[&str] = &[

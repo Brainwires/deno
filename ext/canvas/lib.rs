@@ -36,7 +36,11 @@ deno_core::extension!(
 deno_core::extension!(
   deno_canvas_offscreen,
   deps = [deno_webidl, deno_web],
-  ops = [op_init_canvas],
+  ops = [
+    op_init_canvas,
+    canvas::op_offscreen_canvas_transfer,
+    canvas::op_offscreen_canvas_receive,
+  ],
   objects = [
     bitmaprenderer::ImageBitmapRenderingContext,
     canvas::OffscreenCanvas,
