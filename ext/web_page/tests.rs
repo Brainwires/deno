@@ -1715,7 +1715,13 @@ async fn event_interfaces_look_like_a_browsers() {
             }
           }
           for (const symbol of Object.getOwnPropertySymbols(prototype)) {
-            if (symbol !== Symbol.toStringTag) {
+            // `Deno.nonSerializable` is deno_web's structured-clone opt-out:
+            // non-configurable by design, on every non-serializable
+            // interface (README, "Fingerprint surface"). Known, allowed.
+            if (
+              symbol !== Symbol.toStringTag &&
+              symbol !== Symbol.for("Deno.nonSerializable")
+            ) {
               out.symbols.push(`${name}.${String(symbol)}`);
             }
           }

@@ -382,7 +382,11 @@ Not yet:
   properties; there is no `initEvent()`; `Node.prototype` has a `dispatchEvent`
   of its own; a getter of an event called on something else throws V8's
   private-member `TypeError`, not `Illegal invocation`; unknown HTML elements
-  are plain `HTMLElement`s; `navigator` is minimal.
+  are plain `HTMLElement`s; `navigator` is minimal. The prototypes of
+  `deno_web`'s non-serializable interfaces (`Event`, `EventTarget`, `URL`,
+  `TextEncoder`, `AbortController`, ...) carry
+  `Symbol.for("Deno.nonSerializable")`, the structured-clone opt-out, which is
+  non-configurable by design.
 - No cookies and no HTTP authentication: no request carries a credential the
   page did not write itself (see the same-origin policy above for what the
   credentials mode still decides). `document.cookie` is not there.
